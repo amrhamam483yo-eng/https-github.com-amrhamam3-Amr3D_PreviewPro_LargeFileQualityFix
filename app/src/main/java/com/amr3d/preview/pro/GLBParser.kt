@@ -10,39 +10,66 @@ import kotlin.math.sqrt
 
 class GLBParseException(message: String) : Exception(message)
 
-/**
- * قارئ ملفات GLB (glTF ثنائي — الصيغة اللي بتحط كل حاجة في ملف واحد self-contained،
- * عكس .gltf العادي اللي بييجي مع ملفات .bin وصور منفصلة — .gltf مش مدعومة دلوقتي
- * عمدًا، لأنها هتحتاج تعامل إضافي مع نظام أذونات الملفات في أندرويد SAF).
- *
- * ⚠️ قرارات نطاق متعمّدة (زي OBJParser بالظبط، لغرض "عرض + قياس + فحص" بس):
- * - بنتجاهل الـ Animations/Skinning/Morph Targets تمامًا — ملهومش معنى هنا.
- * - بنتجاهل المواد/الـ Textures تمامًا — لون واحد افتراضي زي أي موديل تاني.
- * - بندعم بس الـ Buffers المُضمّنة (GLB Binary Chunk) أو data-URI base64 —
- *   مش بنقرأ Buffers بترجع لملفات خارجية منفصلة (نادر جدًا في ملفات .glb أصلاً،
- *   الأساس إنها self-contained).
- * - بنعالج بس الأوجه من نوع TRIANGLES (mode=4 أو غير محدد) — أي Primitive من
- *   نوع تاني (خطوط/نقط) بيتجاهل.
- *
- * ⚠️ فرق جوهري عن STL/OBJ: GLB صيغة ثنائية بأوفستات مباشرة جوه الملف (مش قابلة
- * للقراءة كـ Stream سطر بسطر)، فلازم الملف كله يترفع للذاكرة أول ما نبدأ (زي أي
- * قارئ glTF عادي بيشتغل). عشان كده فيه سقف منفصل على حجم الملف الخام نفسه (مش
- * بس على عدد المثلثات الناتج) — الأولوية الأمان، مش دعم أي حجم ملف.
- */
+// ═══ جديد: data class للمادة المستخرجة من glTF ═══
+data class GLBResolvedMaterial(
+    val baseColorFactor: FloatArray = floatArrayOf(1f, 1f, 1f, 1f),
+    val metallicFactor: Float = 0f,
+    val roughnessFactor: Float = 1f,
+    val baseColorTextureIndex: Int = -1
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as GLBResolvedMaterial
+        if (!baseColorFactor.contentEquals(other.baseColorFactor)) return false
+        if (metallicFactor != other.metallicFactor) return false
+        if (roughnessFactor != other.roughnessFactor) return false
+        if (baseColorTextureIndex != other.baseColorTextureIndex) return false
+        return true
+    }
+    override fun hashCode(): Int {
+        var result = baseColorFactor.contentHashCode()
+        result = 31 * result + metallicFactor.hashCode()
+        result = 31 * result + roughnessFactor.hashCode()
+        result = 31 * result + baseColorTextureIndex
+        return result
+    }
+}
+
+// ═══ جديد: نتيجة القراءة الكاملة (موديل + مواد + indices) ═══
+data class GLBParseResult(
+    val stlModel: STLModel,
+    val materials: List<GLBResolvedMaterial>,
+    val triangleMaterialIndices: IntArray
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as GLBParseResult
+        if (stlModel != other.stlModel) return false
+        if (materials != other.materials) return false
+        if (!triangleMaterialIndices.contentEquals(other.triangleMaterialIndices)) return false
+        return true
+    }
+    override fun hashCode(): Int {
+        var result = stlModel.hashCode()
+        result = 31 * result + materials.hashCode()
+        result = 31 * result + triangleMaterialIndices.contentHashCode()
+        return result
+    }
+}
+
 object GLBParser {
 
     private const val MAGIC = 0x46546C67 // "glTF" كـ uint32 little-endian
     private const val CHUNK_TYPE_JSON = 0x4E4F534A
     private const val CHUNK_TYPE_BIN = 0x004E4942
 
-    /** سقف حجم الملف الخام (البايتات) اللي مسموح نرفعه كامل للذاكرة — أضيق من
-     * سقف STL (اللي بيقرا Stream مش الملف كله) عمدًا، لأن GLB لازم يتحمّل بالكامل. */
     private fun maxGlbFileBytes(): Long {
         val maxHeap = Runtime.getRuntime().maxMemory()
         return (maxHeap * 0.35).toLong().coerceAtLeast(50_000_000L)
     }
 
-    /** نفس فكرة STLParser.safeTriangleCap — سقف أمان لعدد المثلثات الناتجة. */
     private fun safeTriangleCap(): Int {
         val maxHeapBytes = Runtime.getRuntime().maxMemory()
         val budgetBytes = (maxHeapBytes * 0.18).toLong()
@@ -50,7 +77,13 @@ object GLBParser {
         return cap.coerceIn(250_000L, 4_000_000L).toInt()
     }
 
+    // ═══ القديمة: نفس الـ signature بالظبط — backward compatibility ═══
     fun parse(context: Context, uri: Uri, onProgress: (Int) -> Unit = {}): STLModel {
+        return parseWithMaterials(context, uri, onProgress).stlModel
+    }
+
+    // ═══ جديد: parse كامل مع استخراج المواد ═══
+    fun parseWithMaterials(context: Context, uri: Uri, onProgress: (Int) -> Unit = {}): GLBParseResult {
         val resolver = context.contentResolver
 
         val fileSize: Long = resolver.query(
@@ -66,8 +99,6 @@ object GLBParser {
             throw GLBParseException(context.getString(R.string.error_glb_too_large))
         }
 
-        // ── لازم نرفع الملف كله للذاكرة (مفيش بديل حقيقي لملف ثنائي بأوفستات
-        // مباشرة زي GLB) — بس بعد التأكد إن حجمه تحت السقف الأمن فوق ──
         onProgress(5)
         val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
             ?: throw GLBParseException(context.getString(R.string.error_glb_read_failed))
@@ -82,7 +113,6 @@ object GLBParser {
         if (magic != MAGIC) throw GLBParseException(context.getString(R.string.error_glb_not_glb))
         if (totalLength > bytes.size + 8) throw GLBParseException(context.getString(R.string.error_glb_corrupt))
 
-        // ── قراءة الـ Chunks (JSON إجباري وأول واحد دايمًا، BIN اختياري بعده) ──
         var jsonBytes: ByteArray? = null
         var binBytes: ByteArray? = null
         var offset = 12
@@ -110,26 +140,46 @@ object GLBParser {
         val scenesArr = root.optJSONArray("scenes")
         val sceneIndex = root.optInt("scene", 0)
 
-        // ── حل الـ Buffers: بناخد بس buffer[0] المُضمّن (الـ BIN chunk) أو أي
-        // buffer بـ data-URI base64 — أي buffer بيرجع لملف خارجي بيتجاهل (نادر
-        // جدًا في .glb أصلاً، ومش مدعوم عمدًا في المرحلة دي) ──
         val resolvedBuffers = Array(buffersJson.length()) { i ->
             val b = buffersJson.getJSONObject(i)
             val uriStr = b.optString("uri", "")
             when {
-                uriStr.isEmpty() -> binBytes // GLB embedded
+                uriStr.isEmpty() -> binBytes
                 uriStr.startsWith("data:") -> {
                     val base64Part = uriStr.substringAfter("base64,", "")
                     if (base64Part.isNotEmpty()) android.util.Base64.decode(base64Part, android.util.Base64.DEFAULT) else null
                 }
-                else -> null // ملف خارجي — مش مدعوم
+                else -> null
+            }
+        }
+
+        // ═══ جديد: قراءة المواد من glTF JSON ═══
+        val materialsList = ArrayList<GLBResolvedMaterial>()
+        val materialsJson = root.optJSONArray("materials")
+        if (materialsJson != null) {
+            for (i in 0 until materialsJson.length()) {
+                val mat = materialsJson.getJSONObject(i)
+                val pbr = mat.optJSONObject("pbrMetallicRoughness")
+                val baseColorFactor = if (pbr != null && pbr.has("baseColorFactor")) {
+                    val arr = pbr.getJSONArray("baseColorFactor")
+                    floatArrayOf(
+                        arr.optDouble(0, 1.0).toFloat(),
+                        arr.optDouble(1, 1.0).toFloat(),
+                        arr.optDouble(2, 1.0).toFloat(),
+                        arr.optDouble(3, 1.0).toFloat()
+                    )
+                } else floatArrayOf(1f, 1f, 1f, 1f)
+                val metallicFactor = pbr?.optDouble("metallicFactor", 0.0)?.toFloat() ?: 0f
+                val roughnessFactor = pbr?.optDouble("roughnessFactor", 1.0)?.toFloat() ?: 1f
+                val baseColorTextureIndex = pbr?.optJSONObject("baseColorTexture")?.optInt("index", -1) ?: -1
+                materialsList.add(GLBResolvedMaterial(baseColorFactor, metallicFactor, roughnessFactor, baseColorTextureIndex))
             }
         }
 
         fun componentSize(componentType: Int): Int = when (componentType) {
-            5120, 5121 -> 1 // BYTE / UNSIGNED_BYTE
-            5122, 5123 -> 2 // SHORT / UNSIGNED_SHORT
-            5125, 5126 -> 4 // UNSIGNED_INT / FLOAT
+            5120, 5121 -> 1
+            5122, 5123 -> 2
+            5125, 5126 -> 4
             else -> 4
         }
         fun typeComponentCount(type: String): Int = when (type) {
@@ -137,8 +187,6 @@ object GLBParser {
             "MAT4" -> 16; else -> 1
         }
 
-        /** بيقرا Accessor كـ FloatArray (لـ POSITION/NORMAL، دايمًا VEC3 FLOAT عمليًا)،
-         * وبيراعي byteStride لو الـ bufferView بيانات متداخلة (Interleaved). */
         fun readFloatAccessor(accessorIdx: Int): FloatArray? {
             if (accessorIdx < 0 || accessorIdx >= accessors.length()) return null
             val acc = accessors.getJSONObject(accessorIdx)
@@ -166,7 +214,7 @@ object GLBParser {
                 val elemStart = baseOffset + i * stride
                 for (c in 0 until numComp) {
                     val pos = elemStart + c * compSize
-                    if (pos + compSize > buf.size) return out // نتوقف بأمان لو البيانات ناقصة
+                    if (pos + compSize > buf.size) return out
                     out[i * numComp + c] = when (componentType) {
                         5126 -> bb.getFloat(pos)
                         5125 -> bb.getInt(pos).toFloat()
@@ -181,7 +229,6 @@ object GLBParser {
             return out
         }
 
-        /** بيقرا Accessor الـ Indices (SCALAR — أي نوع عدد صحيح) كـ IntArray. */
         fun readIndexAccessor(accessorIdx: Int): IntArray? {
             if (accessorIdx < 0 || accessorIdx >= accessors.length()) return null
             val acc = accessors.getJSONObject(accessorIdx)
@@ -214,8 +261,6 @@ object GLBParser {
             return out
         }
 
-        // ── مصفوفة 4×4 (Column-major زي glTF بالظبط) — عمليات أساسية بس (ضرب
-        // مصفوفتين، تطبيق على نقطة/اتجاه) — مفيش حاجة تانية محتاجينها هنا ──
         fun identity4(): DoubleArray = doubleArrayOf(
             1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0
         )
@@ -241,7 +286,6 @@ object GLBParser {
             val qx = q?.optDouble(0, 0.0) ?: 0.0; val qy = q?.optDouble(1, 0.0) ?: 0.0
             val qz = q?.optDouble(2, 0.0) ?: 0.0; val qw = q?.optDouble(3, 1.0) ?: 1.0
 
-            // Quaternion -> 3x3 rotation
             val xx = qx*qx; val yy = qy*qy; val zz = qz*qz
             val xy = qx*qy; val xz = qx*qz; val yz = qy*qz
             val wx = qw*qx; val wy = qw*qy; val wz = qw*qz
@@ -249,7 +293,6 @@ object GLBParser {
             val r10 = 2*(xy+wz);   val r11 = 1-2*(xx+zz); val r12 = 2*(yz-wx)
             val r20 = 2*(xz-wy);   val r21 = 2*(yz+wx);   val r22 = 1-2*(xx+yy)
 
-            // TRS مجمّعة (Column-major): Scale الأول، بعدين Rotation، بعدين Translation
             return doubleArrayOf(
                 r00*sx, r10*sx, r20*sx, 0.0,
                 r01*sy, r11*sy, r21*sy, 0.0,
@@ -275,9 +318,6 @@ object GLBParser {
         val maxTriangles = safeTriangleCap()
         var triangleCounter = 0L
         var keptCount = 0
-        // ── تقدير مبدئي لإجمالي المثلثات (من مجموع كل الـ Primitives) لحساب
-        // Stride مناسب من الأول — أدق بكتير من تقدير STL/OBJ لأننا هنا فعليًا
-        // عارفين عدد الرؤوس/الإندكسات بالظبط من الـ JSON قبل ما نبدأ نقرا البيانات ──
         var estimatedTotalTriangles = 0L
         for (mi in 0 until meshes.length()) {
             val prims = meshes.getJSONObject(mi).optJSONArray("primitives") ?: continue
@@ -300,11 +340,15 @@ object GLBParser {
 
         val outVerts = ArrayList<Float>(minOf(3_000_000, maxTriangles * 9))
         val outNorms = ArrayList<Float>(minOf(3_000_000, maxTriangles * 9))
+        // ═══ جديد: قائمة material index لكل مثلث محتفظ ═══
+        val triangleMaterialIndicesList = ArrayList<Int>(minOf(estimatedTotalTriangles.toInt(), maxTriangles).coerceAtLeast(16))
+
         var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE; var minZ = Float.MAX_VALUE
         var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE; var maxZ = -Float.MAX_VALUE
 
-        fun processPrimitive(prim: JSONObject, worldMatrix: DoubleArray) {
-            if (prim.optInt("mode", 4) != 4) return // TRIANGLES بس
+        // ═══ جديد: استقبال materialIdx ═══
+        fun processPrimitive(prim: JSONObject, worldMatrix: DoubleArray, materialIdx: Int) {
+            if (prim.optInt("mode", 4) != 4) return
             val attrs = prim.optJSONObject("attributes") ?: return
             val posAccIdx = attrs.optInt("POSITION", -1)
             if (posAccIdx < 0) return
@@ -313,8 +357,6 @@ object GLBParser {
             val rawNormals = if (normAccIdx >= 0) readFloatAccessor(normAccIdx) else null
 
             val vertexCount = rawPositions.size / 3
-            // نحوّل كل الرؤوس لمساحة العالم مرة واحدة (أرخص من التحويل لكل مثلث لو
-            // فيه فهرسة بتكرر نفس الرأس في أكتر من مثلث)
             val worldPos = Array(vertexCount) { i ->
                 applyPoint(worldMatrix, rawPositions[i*3], rawPositions[i*3+1], rawPositions[i*3+2])
             }
@@ -322,8 +364,6 @@ object GLBParser {
                 applyDir(worldMatrix, rawNormals[i*3], rawNormals[i*3+1], rawNormals[i*3+2])
             } else null
 
-            // الحدود الخارجية بتتحسب من كل رأس في الـ Primitive ده (حتى المتجاهل
-            // من التخزين بسبب الـ Stride) — نفس فلسفة STLParser بالظبط
             for (p in worldPos) {
                 if (p[0] < minX) minX = p[0]; if (p[1] < minY) minY = p[1]; if (p[2] < minZ) minZ = p[2]
                 if (p[0] > maxX) maxX = p[0]; if (p[1] > maxY) maxY = p[1]; if (p[2] > maxZ) maxZ = p[2]
@@ -353,6 +393,7 @@ object GLBParser {
                         outNorms.add(fa[0]); outNorms.add(fa[1]); outNorms.add(fa[2])
                         outNorms.add(fb[0]); outNorms.add(fb[1]); outNorms.add(fb[2])
                         outNorms.add(fc[0]); outNorms.add(fc[1]); outNorms.add(fc[2])
+                        triangleMaterialIndicesList.add(materialIdx) // ═══ جديد ═══
                         keptCount++
                     }
                 }
@@ -367,7 +408,11 @@ object GLBParser {
             val meshIdx = node.optInt("mesh", -1)
             if (meshIdx >= 0 && meshIdx < meshes.length()) {
                 val prims = meshes.getJSONObject(meshIdx).optJSONArray("primitives")
-                if (prims != null) for (pi in 0 until prims.length()) processPrimitive(prims.getJSONObject(pi), world)
+                if (prims != null) for (pi in 0 until prims.length()) {
+                    val prim = prims.getJSONObject(pi)
+                    val matIdx = prim.optInt("material", -1) // ═══ جديد ═══
+                    processPrimitive(prim, world, matIdx)
+                }
             }
             val children = node.optJSONArray("children")
             if (children != null) for (ci in 0 until children.length()) walkNode(children.getInt(ci), world)
@@ -378,7 +423,6 @@ object GLBParser {
             val sceneNodes = scenesArr.getJSONObject(sceneIndex).optJSONArray("nodes")
             if (sceneNodes != null) for (i in 0 until sceneNodes.length()) rootNodeIndices.add(sceneNodes.getInt(i))
         } else {
-            // مفيش scene محدد — امشي على كل الـ nodes الجذرية (اللي مش أبناء لحد)
             for (i in 0 until nodes.length()) rootNodeIndices.add(i)
         }
         onProgress(40)
@@ -389,17 +433,20 @@ object GLBParser {
             throw GLBParseException(context.getString(R.string.error_glb_no_geometry))
         }
 
-        return STLModel(
-            vertices = outVerts.toFloatArray(),
-            normals = outNorms.toFloatArray(),
-            triangleCount = keptCount,
-            minBounds = floatArrayOf(minX, minY, minZ),
-            maxBounds = floatArrayOf(maxX, maxY, maxZ),
-            // ⚠️ إضافة (نفس ملحوظة OBJParser بالظبط) — estimatedOriginalTriangleCount
-            // و isApproximate حقول مطلوبة في STLModel الحالي كانت ناقصة هنا
-            estimatedOriginalTriangleCount = triangleCounter.toInt(),
-            isApproximate = stride > 1,
-            isWatertightHint = (keptCount % 2 == 0)
+        // ═══ جديد: نرجع GLBParseResult كامل ═══
+        return GLBParseResult(
+            stlModel = STLModel(
+                vertices = outVerts.toFloatArray(),
+                normals = outNorms.toFloatArray(),
+                triangleCount = keptCount,
+                minBounds = floatArrayOf(minX, minY, minZ),
+                maxBounds = floatArrayOf(maxX, maxY, maxZ),
+                estimatedOriginalTriangleCount = triangleCounter.toInt(),
+                isApproximate = stride > 1,
+                isWatertightHint = (keptCount % 2 == 0)
+            ),
+            materials = materialsList,
+            triangleMaterialIndices = triangleMaterialIndicesList.toIntArray()
         )
     }
 
