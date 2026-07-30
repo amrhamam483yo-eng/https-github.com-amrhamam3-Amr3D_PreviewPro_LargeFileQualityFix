@@ -12,21 +12,24 @@ import javax.microedition.khronos.opengles.GL10
 
 class STLRenderer : GLSurfaceView.Renderer {
 
-    // --- Shaders مع دعم اتجاه الإضاءة ---
+    // --- Shaders مع دعم اتجاه الإضاءة + ألوان الرؤوس (Vertex Colors) لملفات GLB ---
     private val vertexShaderCode = """
         uniform mat4 uMVPMatrix;
         uniform mat4 uNormalMatrix;
         uniform mat4 uModelMatrix;
         attribute vec4 vPosition;
         attribute vec3 vNormal;
+        attribute vec4 aColor;
         varying vec3 fNormal;
         varying highp vec3 fPosition;
         varying highp vec3 fWorldPos;
+        varying vec4 fVertexColor;
         void main() {
             gl_Position = uMVPMatrix * vPosition;
             fNormal    = normalize((uNormalMatrix * vec4(vNormal, 0.0)).xyz);
             fPosition  = vPosition.xyz;
             fWorldPos  = (uModelMatrix * vPosition).xyz;
+            fVertexColor = aColor;
         }
     """.trimIndent()
 
@@ -35,6 +38,7 @@ class STLRenderer : GLSurfaceView.Renderer {
         varying vec3 fNormal;
         varying highp vec3 fPosition;
         varying highp vec3 fWorldPos;
+        varying vec4 fVertexColor;
         uniform vec4 uColor;
         uniform vec3 uLightDir;
         uniform int  uMaterial;
@@ -47,6 +51,7 @@ class STLRenderer : GLSurfaceView.Renderer {
         // الموديل الحقيقي (مم صغيرة أو أمتار) — قبل كده كانت بتتلخبط (تتكدّس أو تختفي)
         // لأي موديل مش قريب من الحجم اللي الرقم الثابت كان متظبّط عليه.
         uniform float uPatternScale;
+        uniform int uUseVertexColor;
 
         // ═══ Hash & Noise (لسه محتاجينها لشبكة الأرضية وتأثيرات تانية) ═══
         float hash(highp vec3 p) {
@@ -65,7 +70,15 @@ class STLRenderer : GLSurfaceView.Renderer {
             // (Soft Specular، Blinn-Phong بمدى واسع مش حاد) فوقها — مش PBR كامل،
             // بس بتقرّب الإحساس من مرجع "غلاية بإضاءة ناعمة واقعية": توازن نور/ظل
             // أوضح وحواف بتلمع بهدوء بدل ما تبقى مطفية 100%. ═══
-            vec3 col = uColor.rgb;
+            vec3 col;
+            float baseAlpha;
+            if (uUseVertexColor == 1) {
+                col = fVertexColor.rgb;
+                baseAlpha = fVertexColor.a;
+            } else {
+                col = uColor.rgb;
+                baseAlpha = uColor.a;
+            }
 
             float NdotL  = max(dot(N, L), 0.0);
             // ضوء تعبئة من الاتجاه المعاكس تقريبًا — بيوضّح التفاصيل في المناطق
@@ -101,7 +114,7 @@ class STLRenderer : GLSurfaceView.Renderer {
             vec3 result = ambient + diffuse + fill + rimLight + rim + specCol;
             result = result / (result + vec3(0.55));  // tone mapping بسيط
             result = pow(result, vec3(0.9));           // gamma تقريبي
-            gl_FragColor = vec4(result, uColor.a * uOpacityMultiplier);
+            gl_FragColor = vec4(result, baseAlpha * uOpacityMultiplier);
         }
     """.trimIndent()
 
@@ -160,9 +173,12 @@ class STLRenderer : GLSurfaceView.Renderer {
     private var vertexCountToDraw = 0
 
     // VBO handles — data lives on GPU after upload
-    private val vboIds = IntArray(3) // [0]=vertex [1]=normal [2]=wireframe
+    private val vboIds = IntArray(4) // [0]=vertex [1]=normal [2]=wireframe [3]=color
     private var vboReady = false
     private var pendingModel: STLModel? = null
+    @Volatile private var useVertexColors = false
+    private var pendingMaterials: List<GLBResolvedMaterial>? = null
+    private var pendingMaterialIndices: IntArray? = null
 
     // جودة العرض من الإعدادات: 0=منخفضة 1=متوسطة 2=عالية
     @Volatile var qualityLevel: Int = 2
@@ -361,6 +377,9 @@ class STLRenderer : GLSurfaceView.Renderer {
         vertexCountToDraw = 0
         wireframeVertexCount = 0
         vboReady = false
+        useVertexColors = false
+        pendingMaterials = null
+        pendingMaterialIndices = null
         measurementPoints.clear()
         measurementPointTimes.clear()
         previewPoint = null
@@ -371,6 +390,8 @@ class STLRenderer : GLSurfaceView.Renderer {
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, 0, null, GLES20.GL_STATIC_DRAW)
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboIds[2])
             GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, 0, null, GLES20.GL_STATIC_DRAW)
+            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboIds[3])
+            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, 0, null, GLES20.GL_STATIC_DRAW)
             GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
         }
     }
@@ -378,6 +399,52 @@ class STLRenderer : GLSurfaceView.Renderer {
     fun setModel(model: STLModel) {
         currentModel = model
         pendingModel = model   // يُرفع على GL thread في onDrawFrame أو onSurfaceCreated
+        useVertexColors = false
+        pendingMaterials = null
+        pendingMaterialIndices = null
+
+        modelCenter = floatArrayOf(
+            (model.minBounds[0] + model.maxBounds[0]) / 2f,
+            (model.minBounds[1] + model.maxBounds[1]) / 2f,
+            (model.minBounds[2] + model.maxBounds[2]) / 2f
+        )
+        val dx = model.maxBounds[0] - model.minBounds[0]
+        val dy = model.maxBounds[1] - model.minBounds[1]
+        val dz = model.maxBounds[2] - model.minBounds[2]
+        modelRadius = (maxOf(dx, dy, dz) / 2f).let { if (it <= 0f) 1f else it }
+        // أدنى نقطة Y حقيقية — دي هتستخدم لمكان الظل/الـ Glow بدل التقريب القديم
+        // (نصف القطر)، فهيبقوا مظبوطين تحت الموديل بالظبط
+        modelBottomY = model.minBounds[1]
+        modelMinBounds = model.minBounds.copyOf()
+        modelMaxBounds = model.maxBounds.copyOf()
+
+        // زاوية افتراضية توازنية (Three-quarter view) تفضّل تُظهر السطح العلوي +
+        // الوجه الأمامي + جزء من الجانب مع بعض، بدل زاوية شبه جانبية كانت بتطلع
+        // "مفرودة" أفقيًا لموديلات طويلة/رفيعة (زي شكل قناة أو نصل).
+        // ⚠️ نفس زاوية زرار "Reset" بالظبط (resetCamera في ViewerFragment) — الفرق
+        // الوحيد إن الدخول بيبقى بزووم أقل شوية (0.85 بدل 1) عشان الموديل يـ"فيت"
+        // مع الشاشة بهامش مريح أول ما يتفتح، وبعدين أي Reset بعد كده بيرجّع
+        // للزووم الطبيعي (1) زي المتوقع من "إعادة ضبط".
+        rotationX = 25f; rotationY = 35f; scaleFactor = 0.85f; panX = 0f; panY = 0f
+        pivotOverride = null
+        measurementPoints.clear()
+        introActive = true
+        introStartMs = android.os.SystemClock.uptimeMillis()
+        updateProjection()
+    }
+
+    fun setModel(model: STLModel, materials: List<GLBResolvedMaterial>?, materialIndices: IntArray?) {
+        currentModel = model
+        pendingModel = model   // يُرفع على GL thread في onDrawFrame أو onSurfaceCreated
+        if (materials != null && materialIndices != null) {
+            pendingMaterials = materials
+            pendingMaterialIndices = materialIndices
+            useVertexColors = true
+        } else {
+            useVertexColors = false
+            pendingMaterials = null
+            pendingMaterialIndices = null
+        }
 
         modelCenter = floatArrayOf(
             (model.minBounds[0] + model.maxBounds[0]) / 2f,
@@ -454,6 +521,27 @@ class STLRenderer : GLSurfaceView.Renderer {
         return model.copy(minBounds = minB, maxBounds = maxB)
     }
 
+    private fun buildVertexColors(model: STLModel, materials: List<GLBResolvedMaterial>, materialIndices: IntArray): FloatArray {
+        val triangleCount = model.triangleCount
+        val colors = FloatArray(triangleCount * 3 * 4)
+        for (t in 0 until triangleCount) {
+            val matIdx = materialIndices.getOrElse(t) { -1 }
+            val mat = materials.getOrNull(matIdx)
+            val r = mat?.baseColorFactor?.getOrNull(0) ?: 1f
+            val g = mat?.baseColorFactor?.getOrNull(1) ?: 1f
+            val b = mat?.baseColorFactor?.getOrNull(2) ?: 1f
+            val a = mat?.baseColorFactor?.getOrNull(3) ?: 1f
+            val base = t * 3 * 4
+            for (v in 0..2) {
+                val offset = base + v * 4
+                colors[offset] = r
+                colors[offset + 1] = g
+                colors[offset + 2] = b
+                colors[offset + 3] = a
+            }
+        }
+        return colors
+    }
 
     /** Uploads model geometry to GPU VBOs using chunked approach to avoid OOM. Called on GL thread. */
     private fun uploadModelToGPU(model: STLModel) {
@@ -480,648 +568,4 @@ class STLRenderer : GLSurfaceView.Renderer {
             // Wireframe: LOD مع حد أقصى 50K مثلث للـ wireframe
             val triCount = vertexCountToDraw / 3
             val qualityMultiplier = when (qualityLevel) {
-                0 -> 4    // منخفضة — أقل تفاصيل، أداء أسرع
-                1 -> 2    // متوسطة
-                else -> 1 // عالية — كل التفاصيل
-            }
-            val wireStep = when {
-                triCount > 1_000_000 -> 20
-                triCount > 500_000   -> 10
-                triCount > 200_000   -> 5
-                triCount > 50_000    -> 2
-                else                 -> 1
-            } * qualityMultiplier
-            val maxWireTris = minOf((triCount + wireStep - 1) / wireStep, 50_000)
-            val wireBytes = maxWireTris * 6 * 3 * 4
-            val wb = ByteBuffer.allocateDirect(wireBytes).order(ByteOrder.nativeOrder())
-            val wf = wb.asFloatBuffer()
-            var wCount = 0; var vSrc = 0; var t = 0
-            while (t < triCount && wCount < maxWireTris) {
-                val base = vSrc
-                if (base + 8 < verts.size) {
-                    val ax = verts[base];   val ay = verts[base+1]; val az = verts[base+2]
-                    val bx = verts[base+3]; val by = verts[base+4]; val bz = verts[base+5]
-                    val cx = verts[base+6]; val cy = verts[base+7]; val cz = verts[base+8]
-                    wf.put(ax); wf.put(ay); wf.put(az)
-                    wf.put(bx); wf.put(by); wf.put(bz)
-                    wf.put(bx); wf.put(by); wf.put(bz)
-                    wf.put(cx); wf.put(cy); wf.put(cz)
-                    wf.put(cx); wf.put(cy); wf.put(cz)
-                    wf.put(ax); wf.put(ay); wf.put(az)
-                    wCount++
-                }
-                t += wireStep; vSrc += wireStep * 9
-            }
-            wb.position(0)
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboIds[2])
-            GLES20.glBufferData(GLES20.GL_ARRAY_BUFFER, wCount * 18 * 4, wb, GLES20.GL_STATIC_DRAW)
-            wireframeVertexCount = wCount * 6
-
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
-            vertexBuffer = null; normalBuffer = null; wireframeBuffer = null
-            vboReady = true
-
-        } catch (e: OutOfMemoryError) {
-            // fallback: رسم بدون wireframe بـ CPU buffers مصغرة
-            android.util.Log.e("STLRenderer", "OOM in uploadModelToGPU, using CPU fallback")
-            val maxVerts = minOf(verts.size, 3_000_000)
-            vertexBuffer = ByteBuffer.allocateDirect(maxVerts * 4).order(ByteOrder.nativeOrder())
-                .asFloatBuffer().apply { put(verts, 0, maxVerts); position(0) }
-            normalBuffer = ByteBuffer.allocateDirect(maxVerts * 4).order(ByteOrder.nativeOrder())
-                .asFloatBuffer().apply { put(norms, 0, maxVerts); position(0) }
-            vertexCountToDraw = maxVerts / 3
-            wireframeVertexCount = 0
-            vboReady = false
-        }
-    }
-
-    fun addMeasurementPoint(point: FloatArray) {
-        measurementPoints.add(point)
-        measurementPointTimes.add(android.os.SystemClock.uptimeMillis())
-        if (measurementPoints.size > 2) { measurementPoints.removeAt(0); measurementPointTimes.removeAt(0) }
-        previewPoint = null // النقطة اتثبتت فعلياً، مبقاش محتاجين المعاينة الحية
-    }
-
-    fun clearMeasurementPoints() {
-        measurementPoints.clear(); measurementPointTimes.clear(); previewPoint = null
-    }
-    fun getMeasurementPoints(): List<FloatArray> = measurementPoints.toList()
-
-    override fun onSurfaceCreated(unused: GL10?, config: EGLConfig?) {
-        updateClearColor()
-        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
-        meshProgram = createProgram(vertexShaderCode, fragmentShaderCode)
-        lineProgram = createProgram(lineVertexShaderCode, lineFragmentShaderCode)
-        shadowProgram = createProgram(shadowVertexShaderCode, shadowFragmentShaderCode)
-        // Generate VBO handles
-        GLES20.glGenBuffers(3, vboIds, 0)
-        // Upload any model that was loaded before GL context was ready
-        pendingModel?.let { uploadModelToGPU(it); pendingModel = null }
-    }
-
-    var bgColor = floatArrayOf(0f, 0f, 0f)
-    fun setBackgroundColor(r: Float, g: Float, b: Float) { bgColor = floatArrayOf(r, g, b); updateClearColor() }
-    private fun updateClearColor() { GLES20.glClearColor(bgColor[0], bgColor[1], bgColor[2], 1f) }
-
-    override fun onSurfaceChanged(unused: GL10?, width: Int, height: Int) {
-        surfaceWidth = width; surfaceHeight = height
-        GLES20.glViewport(0, 0, width, height)
-        updateProjection()
-    }
-
-    fun updateProjection() {
-        if (surfaceWidth == 0 || surfaceHeight == 0) return
-        val ratio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
-        val safeRadius = if (modelRadius > 0f) modelRadius else 1f
-        val orthoHalf = safeRadius * 1.4f / scaleFactor
-        val near = -safeRadius * 10f
-        val far = safeRadius * 10f
-        Matrix.orthoM(projectionMatrix, 0,
-            -orthoHalf * ratio, orthoHalf * ratio,
-            -orthoHalf, orthoHalf, near, far)
-    }
-
-    /** إسقاط Perspective حقيقي — بيتستخدم بس أثناء أنيميشن دخول الموديل (البند الجديد)،
-     * عشان إحساس "الاقتراب من بعيد" يبان بصريًا (المشهد العادي بيفضل Orthographic
-     * زي ما كان دايمًا بعد ما الأنيميشن تخلص). */
-    private fun updatePerspectiveProjection(safeRadius: Float) {
-        if (surfaceWidth == 0 || surfaceHeight == 0) return
-        val ratio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
-        val near = safeRadius * 0.05f
-        val far = safeRadius * 300f
-        Matrix.perspectiveM(projectionMatrix, 0, 45f, ratio, near, far)
-    }
-
-    override fun onDrawFrame(unused: GL10?) {
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
-        updateClearColor()
-
-        // أولاً: ارفع أي موديل معلّق — قبل أي فحص أو return
-        pendingModel?.let { uploadModelToGPU(it); pendingModel = null }
-
-        if ((!vboReady && vertexBuffer == null) || vertexCountToDraw == 0) return
-
-        if (autoRotate) rotationY = (rotationY + 0.6f) % 360f
-
-        // "تنفس" خفيف جدًا للموديل وهو واقف من غير ما حد يلمسه — بيوقف فورًا لو
-        // المستخدم بدأ يسحب عشان مايتعارضش مع التحكم اليدوي
-        val floatOffset = if (!isUserInteracting && !suppressIdleFloat) {
-            floatPhase += 0.025f
-            kotlin.math.sin(floatPhase) * (if (modelRadius > 0f) modelRadius else 1f) * 0.012f
-        } else 0f
-
-        // لو المستخدم بدأ يتفاعل (سحب/زووم) أثناء أنيميشن الدخول، نوقفها فورًا ونديله
-        // التحكم العادي على طول من غير ما تتعارك معاه
-        if (introActive && isUserInteracting) introActive = false
-
-        val safeRadius = if (modelRadius > 0f) modelRadius else 1f
-        var camDistance = safeRadius * 5f
-        var introFadeAlpha = 1f
-
-        if (introActive) {
-            val elapsed = android.os.SystemClock.uptimeMillis() - introStartMs
-            val raw = (elapsed.toFloat() / introDurationMs).coerceIn(0f, 1f)
-            // Ease-out تكعيبي: يبدأ سريع وبعدين "يستقر" بنعومة قرب النهاية
-            val t = 1f - (1f - raw) * (1f - raw) * (1f - raw)
-            updatePerspectiveProjection(safeRadius)
-            // من مسافة بعيدة جدًا (60x نصف القطر تقريبًا) لحد المسافة العادية (5x)
-            camDistance = safeRadius * (5f + (1f - t) * 55f)
-            // تلاشي دخول خفيف (الموديل بيتجسّد تدريجيًا مع اقترابه، مش يظهر فجأة بالكامل)
-            introFadeAlpha = (raw * 1.4f).coerceIn(0f, 1f)
-            if (raw >= 1f) introActive = false
-        } else {
-            updateProjection()
-        }
-
-        val panScale = safeRadius * 1.4f / scaleFactor
-
-        Matrix.setIdentityM(modelMatrix, 0)
-        Matrix.rotateM(modelMatrix, 0, rotationX, 1f, 0f, 0f)
-        Matrix.rotateM(modelMatrix, 0, rotationY, 0f, 1f, 0f)
-        val pivot = pivotOverride ?: modelCenter
-        Matrix.translateM(modelMatrix, 0, -pivot[0], -pivot[1] + floatOffset, -pivot[2])
-
-        Matrix.setIdentityM(viewMatrix, 0)
-        Matrix.translateM(viewMatrix, 0, panX * panScale, panY * panScale, -camDistance)
-
-        Matrix.multiplyMM(tempMatrix, 0, viewMatrix, 0, modelMatrix, 0)
-        Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, tempMatrix, 0)
-
-        Matrix.invertM(normalMatrix, 0, modelMatrix, 0)
-        Matrix.transposeM(normalMatrix, 0, normalMatrix, 0)
-
-        drawGroundShadow()
-        if (showReflection) drawReflection() else drawFloorGrid()
-        currentOpacityMultiplier = introFadeAlpha
-        drawMesh()
-        currentOpacityMultiplier = 1f
-
-        val pts = measurementPoints.toList() // snapshot آمن
-        val hasPreview = pts.size == 1 && previewPoint != null
-        if (pts.isNotEmpty() || hasPreview) drawMeasurementOverlay(pts, hasPreview)
-        if (showPivotIndicator) drawPivotIndicator()
-        if (showBoundingBox) drawBoundingBox()
-        if (showOpenEdgesHighlight) drawOpenEdgesHighlight()
-    }
-
-    private fun drawMesh() {
-        if (wireframeMode) drawWireframe() else drawSolidMesh()
-    }
-
-    fun captureFrame(width: Int, height: Int): android.graphics.Bitmap {
-        val buffer = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.nativeOrder())
-        GLES20.glReadPixels(0, 0, width, height, GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer)
-        val bitmap = android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
-        buffer.rewind(); bitmap.copyPixelsFromBuffer(buffer)
-        val matrix = android.graphics.Matrix().apply { postScale(1f, -1f) }
-        return android.graphics.Bitmap.createBitmap(bitmap, 0, 0, width, height, matrix, true)
-    }
-
-    private fun drawWireframe() {
-        if (wireframeVertexCount == 0) return
-        GLES20.glUseProgram(lineProgram)
-        val positionHandle = GLES20.glGetAttribLocation(lineProgram, "vPosition")
-        val mvpHandle = GLES20.glGetUniformLocation(lineProgram, "uMVPMatrix")
-        val colorHandle = GLES20.glGetUniformLocation(lineProgram, "uColor")
-        GLES20.glEnableVertexAttribArray(positionHandle)
-        if (vboReady) {
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboIds[2])
-            GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, 0)
-        } else {
-            val buf = wireframeBuffer ?: return
-            buf.position(0)
-            GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, buf)
-        }
-        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
-        GLES20.glUniform4f(colorHandle, modelColor[0], modelColor[1], modelColor[2], 1f)
-        GLES20.glLineWidth(1.5f)
-        GLES20.glDrawArrays(GLES20.GL_LINES, 0, wireframeVertexCount)
-        GLES20.glDisableVertexAttribArray(positionHandle)
-        if (vboReady) GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
-    }
-
-    /** بيرسم نسخة معكوسة شفافة جدًا من الموديل تحته — انعكاس حقيقي بنفس بيانات
-     * الموديل وبرنامج التظليل، بمصفوفة MVP معكوسة حول أرضية الموديل الحقيقية
-     * (نفس ارتفاع الظل) ودرجة شفافية منخفضة جدًا. */
-    private fun drawReflection() {
-        if (wireframeMode) return // الانعكاس السلكي مش هيبان حلو، بنكتفي بالنسخة المصمتة بس
-        val refY = (pivotOverride ?: modelCenter)[1]
-        val floorY = modelBottomY - refY
-
-        val reflectMat = FloatArray(16)
-        Matrix.setIdentityM(reflectMat, 0)
-        Matrix.translateM(reflectMat, 0, 0f, floorY, 0f)
-        Matrix.scaleM(reflectMat, 0, 1f, -1f, 1f)
-        Matrix.translateM(reflectMat, 0, 0f, -floorY, 0f)
-
-        val reflectedModel = FloatArray(16)
-        Matrix.multiplyMM(reflectedModel, 0, reflectMat, 0, modelMatrix, 0)
-
-        val reflectedTemp = FloatArray(16)
-        Matrix.multiplyMM(reflectedTemp, 0, viewMatrix, 0, reflectedModel, 0)
-        val reflectedMvp = FloatArray(16)
-        Matrix.multiplyMM(reflectedMvp, 0, projectionMatrix, 0, reflectedTemp, 0)
-
-        val reflectedNormal = FloatArray(16)
-        Matrix.invertM(reflectedNormal, 0, reflectedModel, 0)
-        Matrix.transposeM(reflectedNormal, 0, reflectedNormal, 0)
-
-        // نبدّل محتوى المصفوفات المشتركة مؤقتًا (drawSolidMesh بتقرا منها مباشرة)،
-        // نرسم الانعكاس، وبعدين نرجّعها زي ما كانت عشان رسمة الموديل الأساسية تكمل صح
-        val savedMvp = mvpMatrix.copyOf()
-        val savedModel = modelMatrix.copyOf()
-        val savedNormal = normalMatrix.copyOf()
-
-        System.arraycopy(reflectedMvp, 0, mvpMatrix, 0, 16)
-        System.arraycopy(reflectedModel, 0, modelMatrix, 0, 16)
-        System.arraycopy(reflectedNormal, 0, normalMatrix, 0, 16)
-
-        GLES20.glDepthMask(false)
-        GLES20.glEnable(GLES20.GL_BLEND)
-        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        currentOpacityMultiplier = 0.14f
-        drawSolidMesh()
-        currentOpacityMultiplier = 1f
-        GLES20.glDepthMask(true)
-
-        System.arraycopy(savedMvp, 0, mvpMatrix, 0, 16)
-        System.arraycopy(savedModel, 0, modelMatrix, 0, 16)
-        System.arraycopy(savedNormal, 0, normalMatrix, 0, 16)
-    }
-
-    /** شبكة مربعات على مستوى الأرضية — بتترسم بدل الانعكاس لما يكون مقفول من
-     * الإعدادات. بتدي إحساس بمقياس المساحة اللي الموديل واقف عليها، من غير ما
-     * تشتت الانتباه عن الموديل نفسه (خطوط رفيعة باهتة).
-     *
-     * ⚠️ لازم الشبكة تتمركز فعليًا حوالين مركز الموديل الأفقي (X/Z الداخليين —
-     * يعني X/Y الأصليين من ملف التصميم قبل تصحيح المحور)، مش حوالين نقطة الصفر
-     * المحلية للملف (اللي ممكن تكون بعيدة تمامًا عن مركز الموديل الحقيقي لو
-     * الملف اتصمم بعيد عن نقطة الأصل). وعلى المحور الرأسي، لازم تثبت بالظبط عند
-     * أدنى نقطة حقيقية في الموديل، تحته على طول من غير أي إزاحة إضافية. */
-    private fun drawFloorGrid() {
-        val r = if (modelRadius > 0f) modelRadius else 1f
-        // نفس الـ pivot المستخدم في مصفوفة الموديل (draw()) — استخدامه هنا بالظبط
-        // (مش نقطة الصفر) هو اللي بيضمن إن الشبكة تتوسط مع الموديل صح بعد التحويل،
-        // لأن الاتنين بيتطرح منهم نفس الـ pivot في مصفوفة التحويل المشتركة
-        val pivot = pivotOverride ?: modelCenter
-        val centerX = pivot[0]
-        val centerZ = pivot[2]
-        // أدنى نقطة حقيقية في الموديل (نفس نظام إحداثيات الرؤوس الخام، قبل أي
-        // طرح لل pivot — الطرح بيحصل تلقائيًا في مصفوفة الموديل المشتركة)
-        val floorY = modelBottomY
-        val ext = r * 1.7f
-        val divisions = 12
-        val step = (ext * 2f) / divisions
-
-        val lines = ArrayList<Float>((divisions + 1) * 12)
-        for (i in 0..divisions) {
-            val pos = -ext + i * step
-            // خط موازي لمحور X (متمركز حوالين centerX/centerZ الحقيقيين)
-            lines.add(centerX - ext); lines.add(floorY); lines.add(centerZ + pos)
-            lines.add(centerX + ext); lines.add(floorY); lines.add(centerZ + pos)
-            // خط موازي لمحور Z
-            lines.add(centerX + pos); lines.add(floorY); lines.add(centerZ - ext)
-            lines.add(centerX + pos); lines.add(floorY); lines.add(centerZ + ext)
-        }
-        val verts = lines.toFloatArray()
-
-        GLES20.glUseProgram(lineProgram)
-        GLES20.glEnable(GLES20.GL_BLEND)
-        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-
-        val posHandle = GLES20.glGetAttribLocation(lineProgram, "vPosition")
-        val mvpHandle = GLES20.glGetUniformLocation(lineProgram, "uMVPMatrix")
-        val colorHandle = GLES20.glGetUniformLocation(lineProgram, "uColor")
-        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
-        // خطوط أوضح شوية من الأول (كانت alpha 0.35) — بعد ما قلّلنا شفافية الظل،
-        // الشبكة بقت أوضح تلقائيًا، وزودنا وضوحها شوية كمان عشان تبان بثقة أكتر
-        GLES20.glUniform4f(colorHandle, 0.62f, 0.64f, 0.68f, 0.5f)
-        GLES20.glLineWidth(1.2f)
-
-        val vb = ByteBuffer.allocateDirect(verts.size * 4).order(ByteOrder.nativeOrder())
-            .asFloatBuffer().apply { put(verts); position(0) }
-
-        GLES20.glEnableVertexAttribArray(posHandle)
-        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, 0, vb)
-        GLES20.glDrawArrays(GLES20.GL_LINES, 0, verts.size / 3)
-        GLES20.glDisableVertexAttribArray(posHandle)
-    }
-
-    private fun drawSolidMesh() {
-        GLES20.glUseProgram(meshProgram)
-        val positionHandle = GLES20.glGetAttribLocation(meshProgram, "vPosition")
-        val normalHandle   = GLES20.glGetAttribLocation(meshProgram, "vNormal")
-        val mvpHandle      = GLES20.glGetUniformLocation(meshProgram, "uMVPMatrix")
-        val modelMatHandle = GLES20.glGetUniformLocation(meshProgram, "uModelMatrix")
-        GLES20.glUniformMatrix4fv(modelMatHandle, 1, false, modelMatrix, 0)
-        val normalMatrixHandle = GLES20.glGetUniformLocation(meshProgram, "uNormalMatrix")
-        val colorHandle = GLES20.glGetUniformLocation(meshProgram, "uColor")
-        val lightDirHandle = GLES20.glGetUniformLocation(meshProgram, "uLightDir")
-        val materialHandle = GLES20.glGetUniformLocation(meshProgram, "uMaterial")
-        val patternScaleHandle = GLES20.glGetUniformLocation(meshProgram, "uPatternScale")
-        val opacityHandle = GLES20.glGetUniformLocation(meshProgram, "uOpacityMultiplier")
-
-        GLES20.glEnableVertexAttribArray(positionHandle)
-        GLES20.glEnableVertexAttribArray(normalHandle)
-        if (vboReady) {
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboIds[0])
-            GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, 0)
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, vboIds[1])
-            GLES20.glVertexAttribPointer(normalHandle, 3, GLES20.GL_FLOAT, false, 0, 0)
-            GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
-        } else {
-            vertexBuffer?.position(0)
-            GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, vertexBuffer ?: return)
-            normalBuffer?.position(0)
-            GLES20.glVertexAttribPointer(normalHandle, 3, GLES20.GL_FLOAT, false, 0, normalBuffer ?: return)
-        }
-
-        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
-        GLES20.glUniformMatrix4fv(normalMatrixHandle, 1, false, normalMatrix, 0)
-        GLES20.glUniform4fv(colorHandle, 1, modelColor, 0)
-        GLES20.glUniform1i(materialHandle, currentMaterial.id)
-        // تطبيع مقياس النقش الإجرائي على نصف قطر الموديل الفعلي (كان رقم ثابت 0.015
-        // بيفترض حجم موديل معيّن) — كده الخشب/الرخام بيبانوا صح لأي حجم موديل
-        GLES20.glUniform1f(patternScaleHandle, 1f / (if (modelRadius > 0f) modelRadius else 1f))
-        GLES20.glUniform1f(opacityHandle, currentOpacityMultiplier)
-
-        // حساب اتجاه الإضاءة من الزاوية
-        val angleRad = Math.toRadians(lightAngle.toDouble()).toFloat()
-        val lx = kotlin.math.cos(angleRad) * 0.7f
-        val ly = 0.7f
-        val lz = kotlin.math.sin(angleRad) * 0.7f
-        GLES20.glUniform3f(lightDirHandle, lx, ly, lz)
-
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, vertexCountToDraw)
-        GLES20.glDisableVertexAttribArray(positionHandle)
-        GLES20.glDisableVertexAttribArray(normalHandle)
-        if (vboReady) GLES20.glBindBuffer(GLES20.GL_ARRAY_BUFFER, 0)
-    }
-
-    private fun drawMeasurementOverlay(committedPts: List<FloatArray>, hasPreview: Boolean) {
-        val overlayPts = if (hasPreview) committedPts + previewPoint!! else committedPts
-        if (overlayPts.isEmpty()) return
-
-        GLES20.glUseProgram(lineProgram)
-        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
-
-        val positionHandle = GLES20.glGetAttribLocation(lineProgram, "vPosition")
-        val sizeHandle = GLES20.glGetAttribLocation(lineProgram, "vPointSize")
-        val mvpHandle = GLES20.glGetUniformLocation(lineProgram, "uMVPMatrix")
-        val colorHandle = GLES20.glGetUniformLocation(lineProgram, "uColor")
-
-        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
-        GLES20.glEnableVertexAttribArray(positionHandle)
-        GLES20.glEnableVertexAttribArray(sizeHandle)
-
-        val flat = FloatArray(overlayPts.size * 3)
-        val sizes = FloatArray(overlayPts.size)
-        val now = android.os.SystemClock.uptimeMillis()
-        overlayPts.forEachIndexed { i, p ->
-            flat[i * 3] = p[0]; flat[i * 3 + 1] = p[1]; flat[i * 3 + 2] = p[2]
-            // ── حجم النقطة: كبيرة (سهل تشوفها/تحددها بدقة) وقت التثبيت أو وهي لسه
-            // معاينة حية بتتحرك مع الإصبع، وبعدين تصغر تدريجيًا لحجمها المستقر خلال
-            // جزء من الثانية عشان متبقاش مشتتة عن الموديل نفسه ──
-            sizes[i] = if (i < measurementPointTimes.size) {
-                val elapsed = now - measurementPointTimes[i]
-                val t = (elapsed.toFloat() / POINT_SHRINK_DURATION_MS).coerceIn(0f, 1f)
-                POINT_SIZE_RESTING + (POINT_SIZE_LARGE - POINT_SIZE_RESTING) * (1f - t)
-            } else {
-                POINT_SIZE_LARGE // النقطة الحية (المعاينة) — لسه بتتحدد، تفضل كبيرة طول ما بتتحرك
-            }
-        }
-        val fb = ByteBuffer.allocateDirect(flat.size * 4).order(ByteOrder.nativeOrder())
-            .asFloatBuffer().apply { put(flat); position(0) }
-        val sb = ByteBuffer.allocateDirect(sizes.size * 4).order(ByteOrder.nativeOrder())
-            .asFloatBuffer().apply { put(sizes); position(0) }
-
-        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, fb)
-        GLES20.glVertexAttribPointer(sizeHandle, 1, GLES20.GL_FLOAT, false, 0, sb)
-        GLES20.glUniform4f(colorHandle, 1f, 0.75f, 0.1f, 1f)
-        GLES20.glDrawArrays(GLES20.GL_POINTS, 0, overlayPts.size)
-
-        if (overlayPts.size == 2) {
-            GLES20.glUniform4f(colorHandle, 1f, 0.85f, 0.2f, 1f)
-            GLES20.glLineWidth(4f)
-            GLES20.glDrawArrays(GLES20.GL_LINES, 0, 2)
-        }
-
-        GLES20.glDisableVertexAttribArray(positionHandle)
-        GLES20.glDisableVertexAttribArray(sizeHandle)
-        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
-    }
-
-    /** ظل بيضاوي شفاف تحت الموديل — بيدّي إحساس عمق/ثقل إن الموديل واقف على أرضية
-     * مش طاير في الفضاء. بيترسم في نفس فضاء الموديل (بعد الترجمة للمركز) فبيلف
-     * مع الموديل زي أي عنصر تاني بيستخدم mvpMatrix، وده متوافق مع إن مفيش أرضية
-     * ثابتة في المشهد لسه (هتيجي مع ميزة Grid Floor لاحقًا). */
-    private fun drawGroundShadow() {
-        val r = if (modelRadius > 0f) modelRadius else 1f
-        // نفس إصلاح محاذاة الـ Grid بالظبط: بنستخدم نفس الـ pivot المستخدم في
-        // مصفوفة الموديل (مش نقطة الصفر المحلية) عشان الظل يتمركز أفقيًا صح مع
-        // الموديل، وأدنى نقطة Y حقيقية من غير أي طرح إضافي (الطرح بيحصل تلقائيًا
-        // في مصفوفة الموديل المشتركة) عشان يفضل ملتصق تحت الموديل بالظبط
-        val pivot = pivotOverride ?: modelCenter
-        val centerX = pivot[0]
-        val centerZ = pivot[2]
-        val floorY = modelBottomY
-        val ext = r * 1.7f
-        val verts = floatArrayOf(
-            centerX - ext, floorY, centerZ - ext,
-            centerX + ext, floorY, centerZ - ext,
-            centerX - ext, floorY, centerZ + ext,
-            centerX + ext, floorY, centerZ - ext,
-            centerX + ext, floorY, centerZ + ext,
-            centerX - ext, floorY, centerZ + ext
-        )
-        val uvs = floatArrayOf(
-            -1f, -1f,  1f, -1f,  -1f, 1f,
-             1f, -1f,  1f,  1f,  -1f, 1f
-        )
-
-        GLES20.glUseProgram(shadowProgram)
-        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
-        GLES20.glEnable(GLES20.GL_BLEND)
-        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-
-        val posHandle = GLES20.glGetAttribLocation(shadowProgram, "vPosition")
-        val uvHandle = GLES20.glGetAttribLocation(shadowProgram, "vUV")
-        val mvpHandle = GLES20.glGetUniformLocation(shadowProgram, "uMVPMatrix")
-        val colorHandle = GLES20.glGetUniformLocation(shadowProgram, "uGlowColor")
-        val alphaHandle = GLES20.glGetUniformLocation(shadowProgram, "uGlowAlpha")
-        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
-        GLES20.glUniform3f(colorHandle, 0f, 0f, 0f)
-        // شفافية أقل كمان من قبل (كانت 0.24) عشان الظل يفضل يوضّح إن الموديل "واقف"
-        // على الأرضية من غير ما يأثر على وضوح خطوط الـ Grid تحته خالص
-        GLES20.glUniform1f(alphaHandle, 0.16f)
-
-        val vb = ByteBuffer.allocateDirect(verts.size * 4).order(ByteOrder.nativeOrder())
-            .asFloatBuffer().apply { put(verts); position(0) }
-        val ub = ByteBuffer.allocateDirect(uvs.size * 4).order(ByteOrder.nativeOrder())
-            .asFloatBuffer().apply { put(uvs); position(0) }
-
-        GLES20.glEnableVertexAttribArray(posHandle)
-        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, 0, vb)
-        GLES20.glEnableVertexAttribArray(uvHandle)
-        GLES20.glVertexAttribPointer(uvHandle, 2, GLES20.GL_FLOAT, false, 0, ub)
-
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 6)
-
-        GLES20.glDisableVertexAttribArray(posHandle)
-        GLES20.glDisableVertexAttribArray(uvHandle)
-        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
-    }
-
-    /** بيرسم صندوق سلكي شفاف حوالين أقصى حدود الموديل الحقيقية (Bounding Box) — مفيد
-     * لمعرفة أقصى أبعاد هتحتاجها فعليًا للتصنيع (CNC). بيتفعّل/يتقفل بزرار toggle. */
-    private fun drawBoundingBox() {
-        // نستخدم إحداثيات الموديل الخام مباشرة زي ما هي — نفس اللي بيتحول بيها الموديل
-        // نفسه في drawMesh عن طريق mvpMatrix. لو نطرح الـ pivot هنا كمان هيتطرح
-        // مرتين (مرة هنا، ومرة جوه modelMatrix) والصندوق هيتزحزح بعيد عن الموديل.
-        val minX = modelMinBounds[0]; val maxX = modelMaxBounds[0]
-        val minY = modelMinBounds[1]; val maxY = modelMaxBounds[1]
-        val minZ = modelMinBounds[2]; val maxZ = modelMaxBounds[2]
-
-        // 8 أركان الصندوق
-        val c = arrayOf(
-            floatArrayOf(minX, minY, minZ), floatArrayOf(maxX, minY, minZ),
-            floatArrayOf(maxX, maxY, minZ), floatArrayOf(minX, maxY, minZ),
-            floatArrayOf(minX, minY, maxZ), floatArrayOf(maxX, minY, maxZ),
-            floatArrayOf(maxX, maxY, maxZ), floatArrayOf(minX, maxY, maxZ)
-        )
-        // 12 ضلع (كل ضلع = نقطتين) — 4 تحت، 4 فوق، 4 عمودي واصلة بينهم
-        val edges = intArrayOf(
-            0,1, 1,2, 2,3, 3,0,
-            4,5, 5,6, 6,7, 7,4,
-            0,4, 1,5, 2,6, 3,7
-        )
-        val verts = FloatArray(edges.size * 3)
-        for (i in edges.indices) {
-            val p = c[edges[i]]
-            verts[i * 3] = p[0]; verts[i * 3 + 1] = p[1]; verts[i * 3 + 2] = p[2]
-        }
-
-        GLES20.glUseProgram(lineProgram)
-        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
-
-        val positionHandle = GLES20.glGetAttribLocation(lineProgram, "vPosition")
-        val mvpHandle = GLES20.glGetUniformLocation(lineProgram, "uMVPMatrix")
-        val colorHandle = GLES20.glGetUniformLocation(lineProgram, "uColor")
-
-        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
-        GLES20.glUniform4f(colorHandle, 1f, 0.75f, 0.1f, 0.75f)
-        GLES20.glLineWidth(2f)
-
-        val vb = ByteBuffer.allocateDirect(verts.size * 4).order(ByteOrder.nativeOrder())
-            .asFloatBuffer().apply { put(verts); position(0) }
-
-        GLES20.glEnableVertexAttribArray(positionHandle)
-        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, vb)
-        GLES20.glDrawArrays(GLES20.GL_LINES, 0, edges.size)
-        GLES20.glDisableVertexAttribArray(positionHandle)
-
-        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
-    }
-
-    /** هايلايت بسيط للحواف المفتوحة — خطوط حمراء واضحة فوق الموديل، نفس تقنية
-     * drawBoundingBox بالظبط. الهدف بصري بحت ("في حاجة مفتوحة هنا")، مش تقرير دقيق. */
-    private fun drawOpenEdgesHighlight() {
-        val verts = openEdgeHighlightVertices
-        if (verts == null || verts.isEmpty()) return
-
-        GLES20.glUseProgram(lineProgram)
-        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
-
-        val positionHandle = GLES20.glGetAttribLocation(lineProgram, "vPosition")
-        val mvpHandle = GLES20.glGetUniformLocation(lineProgram, "uMVPMatrix")
-        val colorHandle = GLES20.glGetUniformLocation(lineProgram, "uColor")
-
-        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
-        GLES20.glUniform4f(colorHandle, 1f, 0.15f, 0.15f, 0.95f) // أحمر واضح
-        GLES20.glLineWidth(4f) // أعرض من صندوق الأبعاد عشان يبان بوضوح فوق سطح الموديل
-
-        val vb = ByteBuffer.allocateDirect(verts.size * 4).order(ByteOrder.nativeOrder())
-            .asFloatBuffer().apply { put(verts); position(0) }
-
-        GLES20.glEnableVertexAttribArray(positionHandle)
-        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, vb)
-        GLES20.glDrawArrays(GLES20.GL_LINES, 0, verts.size / 3)
-        GLES20.glDisableVertexAttribArray(positionHandle)
-
-        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
-    }
-
-    /** بيرسم علامة صغيرة (خط متقاطع + نقطة) عند مركز الدوران الفعلي للموديل — بيتحرك
-     * ويتلف مع الموديل نفسه لأنه بيتحسب بنفس الـ mvpMatrix، فالمستخدم يشوف بعينه
-     * حوالين أنهي نقطة هو بيلف الموديل وقت السحب بإصبع واحد. */
-    private fun drawPivotIndicator() {
-        GLES20.glUseProgram(lineProgram)
-        GLES20.glDisable(GLES20.GL_DEPTH_TEST)
-
-        val positionHandle = GLES20.glGetAttribLocation(lineProgram, "vPosition")
-        val mvpHandle = GLES20.glGetUniformLocation(lineProgram, "uMVPMatrix")
-        val colorHandle = GLES20.glGetUniformLocation(lineProgram, "uColor")
-
-        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
-        GLES20.glEnableVertexAttribArray(positionHandle)
-
-        // بنرسم العلامة عند إحداثيات الـ pivot الفعلية (مش عند الصفر المحلي) —
-        // عشان بعد ما تتحول بنفس mvpMatrix (اللي بيطرح نفس الـ pivot) تظبط بالظبط
-        // عند نقطة الدوران الحقيقية على سطح الموديل، مش نقطة عشوائية بعيدة عنه.
-        val pivot = pivotOverride ?: modelCenter
-        val len = (if (modelRadius > 0f) modelRadius else 1f) * 0.12f
-        val lines = floatArrayOf(
-            pivot[0] - len, pivot[1], pivot[2],  pivot[0] + len, pivot[1], pivot[2],
-            pivot[0], pivot[1] - len, pivot[2],  pivot[0], pivot[1] + len, pivot[2],
-            pivot[0], pivot[1], pivot[2] - len,  pivot[0], pivot[1], pivot[2] + len
-        )
-        val fb = ByteBuffer.allocateDirect(lines.size * 4).order(ByteOrder.nativeOrder())
-            .asFloatBuffer().apply { put(lines); position(0) }
-
-        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, fb)
-        GLES20.glLineWidth(3f)
-        GLES20.glUniform4f(colorHandle, 1f, 1f, 1f, 0.9f)
-        GLES20.glDrawArrays(GLES20.GL_LINES, 0, 6)
-
-        val dot = floatArrayOf(pivot[0], pivot[1], pivot[2])
-        val dotBuffer = ByteBuffer.allocateDirect(dot.size * 4).order(ByteOrder.nativeOrder())
-            .asFloatBuffer().apply { put(dot); position(0) }
-        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, dotBuffer)
-        GLES20.glUniform4f(colorHandle, 1f, 0.75f, 0.1f, 1f)
-        GLES20.glDrawArrays(GLES20.GL_POINTS, 0, 1)
-
-        GLES20.glDisableVertexAttribArray(positionHandle)
-        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
-    }
-
-    private fun createProgram(vertexCode: String, fragmentCode: String): Int {
-        val v = loadShader(GLES20.GL_VERTEX_SHADER, vertexCode)
-        val f = loadShader(GLES20.GL_FRAGMENT_SHADER, fragmentCode)
-        return GLES20.glCreateProgram().also {
-            GLES20.glAttachShader(it, v)
-            GLES20.glAttachShader(it, f)
-            GLES20.glLinkProgram(it)
-            val linkStatus = IntArray(1)
-            GLES20.glGetProgramiv(it, GLES20.GL_LINK_STATUS, linkStatus, 0)
-            if (linkStatus[0] == 0) {
-                val log = GLES20.glGetProgramInfoLog(it)
-                GLES20.glDeleteProgram(it)
-                throw RuntimeException("Program link failed: $log")
-            }
-        }
-    }
-
-    private fun loadShader(type: Int, shaderCode: String): Int {
-        return GLES20.glCreateShader(type).also {
-            GLES20.glShaderSource(it, shaderCode)
-            GLES20.glCompileShader(it)
-            val compileStatus = IntArray(1)
-            GLES20.glGetShaderiv(it, GLES20.GL_COMPILE_STATUS, compileStatus, 0)
-            if (compileStatus[0] == 0) {
-                val log = GLES20.glGetShaderInfoLog(it)
-                GLES20.glDeleteShader(it)
-                throw RuntimeException("Shader compile failed: $log")
-            }
-        }
-    }
-}
+                0 -> 4    // من
