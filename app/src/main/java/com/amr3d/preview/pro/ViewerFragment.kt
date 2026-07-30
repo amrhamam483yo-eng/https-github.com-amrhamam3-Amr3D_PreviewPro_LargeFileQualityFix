@@ -865,10 +865,14 @@ class ViewerFragment : Fragment() {
                 // ⚠️ التوزيع حسب امتداد الملف — الثلاثة قارئين (STL/OBJ/GLB) بيرجّعوا
                 // نفس شكل STLModel المسطّح بالظبط، فباقي التطبيق (الرندرر، أدوات
                 // القياس، تقرير الفحص، التبسيط...) شغال من غير أي تعديل تاني
+                val glbResult: GLBParseResult? = if (ext == "glb") {
+                    withContext(Dispatchers.IO) { GLBParser.parseWithMaterials(requireContext(), uri, onProgress) }
+                } else null
+
                 val model = withContext(Dispatchers.IO) {
                     when (ext) {
                         "obj" -> OBJParser.parse(requireContext(), uri, onProgress)
-                        "glb" -> GLBParser.parse(requireContext(), uri, onProgress)
+                        "glb" -> glbResult!!.stlModel
                         else  -> STLParser.parse(requireContext(), uri, onProgress)
                     }
                 }
@@ -909,7 +913,11 @@ class ViewerFragment : Fragment() {
 
                 // رفع الموديل على GL thread
                 glViewerView.queueEvent {
-                    glViewerView.stlRenderer.setModel(correctedModel)
+                    if (glbResult != null && glbResult.materials.isNotEmpty()) {
+                        glViewerView.stlRenderer.setModel(correctedModel, glbResult.materials, glbResult.triangleMaterialIndices)
+                    } else {
+                        glViewerView.stlRenderer.setModel(correctedModel)
+                    }
                 }
 
                 // هايلايت الحواف المفتوحة بتاع الموديل القديم مالوش معنى مع موديل جديد
