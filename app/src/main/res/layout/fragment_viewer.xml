@@ -6,17 +6,6 @@
     android:layout_height="match_parent"
     android:background="#050608">
 
-    <!-- Scanlines overlay -->
-    <View
-        android:layout_width="0dp"
-        android:layout_height="0dp"
-        android:background="@drawable/bg_scanlines"
-        android:alpha="0.15"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
-
     <!-- Top Bar - Glass -->
     <LinearLayout
         android:id="@+id/topBar"
@@ -34,11 +23,9 @@
 
         <ImageView
             android:id="@+id/appLogo"
-            android:layout_width="32dp"
-            android:layout_height="32dp"
+            android:layout_width="30dp"
+            android:layout_height="30dp"
             android:src="@drawable/app_logo"
-            android:background="@drawable/bg_logo_glow"
-            android:padding="6dp"
             android:contentDescription="@string/app_name" />
 
         <LinearLayout
@@ -54,8 +41,6 @@
                 android:text="@string/app_name"
                 android:textColor="#F0F2F5"
                 android:textSize="12sp"
-                android:fontFamily="@font/orbitron"
-                android:letterSpacing="0.05"
                 android:textStyle="bold"
                 android:singleLine="true" />
 
@@ -65,10 +50,7 @@
                 android:layout_height="wrap_content"
                 android:textColor="#FF8A1E"
                 android:textSize="9sp"
-                android:fontFamily="@font/orbitron"
-                android:letterSpacing="0.08"
                 android:visibility="gone" />
-
         </LinearLayout>
 
         <ImageButton
@@ -89,17 +71,13 @@
             android:text="2D"
             android:textColor="#FF8A1E"
             android:textSize="11sp"
-            android:fontFamily="@font/orbitron"
             android:textStyle="bold"
-            android:letterSpacing="0.1"
             android:clickable="true"
             android:focusable="true"
             android:contentDescription="@string/toggle_dxf_view"
             android:layout_marginStart="8dp" />
-
     </LinearLayout>
 
-    <!-- Viewer Container -->
     <FrameLayout
         android:id="@+id/viewerContainer"
         android:layout_width="0dp"
@@ -134,35 +112,6 @@
             android:layout_height="match_parent"
             android:visibility="gone" />
 
-        <!-- Data Overlay - Top Right like HTML -->
-        <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="top|end"
-            android:layout_marginTop="12dp"
-            android:layout_marginEnd="12dp"
-            android:orientation="vertical">
-
-            <TextView
-                android:id="@+id/modelStatsText"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textColor="#80FF8A1E"
-                android:textSize="9sp"
-                android:fontFamily="@font/orbitron"
-                android:letterSpacing="0.08"
-                android:gravity="end"
-                android:visibility="gone" />
-
-        </LinearLayout>
-
-        <!-- Corner Accents -->
-        <View android:layout_width="18dp" android:layout_height="18dp" android:layout_gravity="top|start" android:layout_margin="10dp" android:background="@drawable/bg_corner_tl" />
-        <View android:layout_width="18dp" android:layout_height="18dp" android:layout_gravity="top|end" android:layout_margin="10dp" android:background="@drawable/bg_corner_tr" />
-        <View android:layout_width="18dp" android:layout_height="18dp" android:layout_gravity="bottom|start" android:layout_margin="10dp" android:background="@drawable/bg_corner_bl" />
-        <View android:layout_width="18dp" android:layout_height="18dp" android:layout_gravity="bottom|end" android:layout_margin="10dp" android:background="@drawable/bg_corner_br" />
-
-        <!-- Dxf Gap Card - Glass -->
         <LinearLayout
             android:id="@+id/dxfGapCard"
             android:layout_width="wrap_content"
@@ -185,6 +134,19 @@
         </LinearLayout>
 
         <TextView
+            android:id="@+id/modelStatsText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:layout_marginTop="12dp"
+            android:layout_marginEnd="12dp"
+            android:textColor="#80FF8A1E"
+            android:textSize="9sp"
+            android:fontFamily="monospace"
+            android:gravity="end"
+            android:visibility="gone" />
+
+        <TextView
             android:id="@+id/emptyStateText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -192,8 +154,7 @@
             android:text="@string/no_file_loaded"
             android:textColor="#4DF0F2F5"
             android:textSize="12sp"
-            android:fontFamily="@font/orbitron"
-            android:letterSpacing="0.05"
+            android:fontFamily="monospace"
             android:gravity="center"
             android:lineSpacingExtra="4dp" />
 
@@ -249,17 +210,17 @@
             android:layout_height="wrap_content"
             android:layout_gravity="bottom"
             android:orientation="vertical"
-            android:background="@drawable/bg_glass_loading"
+            android:background="#F2050608"
             android:padding="16dp"
             android:visibility="gone">
-            <TextView android:id="@+id/loadingText" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textColor="#FF8A1E" android:textSize="10sp" android:fontFamily="@font/orbitron" android:letterSpacing="0.1" android:gravity="center" android:layout_gravity="center_horizontal" android:layout_marginBottom="8dp" />
+            <TextView android:id="@+id/loadingText" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textColor="#FF8A1E" android:textSize="10sp" android:fontFamily="monospace" android:gravity="center" android:layout_gravity="center_horizontal" android:layout_marginBottom="8dp" />
             <ProgressBar android:id="@+id/loadingProgress" style="@style/Widget.AppCompat.ProgressBar.Horizontal" android:layout_width="match_parent" android:layout_height="4dp" android:max="100" android:progress="0" android:progressTint="#FF8A1E" android:progressBackgroundTint="#1AFFFFFF" />
         </LinearLayout>
 
-        <TextView android:id="@+id/welcomeOverlay" android:layout_width="match_parent" android:layout_height="match_parent" android:layout_gravity="center" android:gravity="center" android:textColor="#FFFFFFFF" android:textSize="26sp" android:fontFamily="@font/orbitron" android:textStyle="bold" android:background="#E6050608" android:visibility="gone" />
+        <TextView android:id="@+id/welcomeOverlay" android:layout_width="match_parent" android:layout_height="match_parent" android:layout_gravity="center" android:gravity="center" android:textColor="#FFFFFFFF" android:textSize="26sp" android:textStyle="bold" android:background="#E6050608" android:visibility="gone" />
 
         <androidx.cardview.widget.CardView android:id="@+id/measurementCard" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_gravity="bottom|start" android:layout_margin="12dp" app:cardBackgroundColor="#CC0A0C10" app:cardCornerRadius="14dp" app:cardElevation="8dp" app:strokeColor="#33FF8A1E" app:strokeWidth="1dp" android:visibility="gone">
-            <TextView android:id="@+id/measurementText" android:layout_width="wrap_content" android:layout_height="wrap_content" android:padding="14dp" android:textColor="#FF8A1E" android:textSize="11sp" android:fontFamily="@font/orbitron" android:letterSpacing="0.05" />
+            <TextView android:id="@+id/measurementText" android:layout_width="wrap_content" android:layout_height="wrap_content" android:padding="14dp" android:textColor="#FF8A1E" android:textSize="11sp" android:fontFamily="monospace" />
         </androidx.cardview.widget.CardView>
 
         <Button android:id="@+id/btnToggleToolbars" style="@style/Widget.MaterialComponents.Button" android:layout_width="44dp" android:layout_height="20dp" android:layout_gravity="bottom|center_horizontal" android:layout_marginBottom="4dp" android:text="⌄" android:textSize="14sp" android:textColor="#FF8A1E" android:padding="0dp" android:minWidth="0dp" android:minHeight="0dp" android:insetTop="0dp" android:insetBottom="0dp" android:backgroundTint="#330A0C10" android:elevation="4dp" android:contentDescription="طي أو إظهار شرائط الأدوات" />
@@ -272,10 +233,8 @@
         <com.amr3d.preview.pro.LightDialOverlayView android:id="@+id/lightDialOverlay" android:layout_width="match_parent" android:layout_height="match_parent" android:visibility="gone" />
 
         <ImageButton android:id="@+id/btnCloseLightWheel" android:layout_width="36dp" android:layout_height="36dp" android:layout_gravity="top|end" android:layout_margin="12dp" android:background="@drawable/bg_glass_button_circle" android:src="@android:drawable/ic_menu_close_clear_cancel" android:tint="#FF8A1E" android:visibility="gone" android:contentDescription="إغلاق" />
-
     </FrameLayout>
 
-    <!-- Display Toolbar - Glass 2050 -->
     <LinearLayout
         android:id="@+id/displayToolbar"
         android:layout_width="0dp"
@@ -292,12 +251,11 @@
 
         <ImageButton android:id="@+id/btnWireframe" android:saveEnabled="false" android:layout_width="0dp" android:layout_height="38dp" android:layout_weight="1" android:layout_marginEnd="6dp" android:padding="8dp" android:scaleType="centerInside" android:background="@drawable/bg_glass_button_2050" android:src="@drawable/ic_wireframe_glyph" android:tint="#FF8A1E" android:contentDescription="@string/wireframe" />
         <ImageButton android:id="@+id/btnMaterial" android:layout_width="0dp" android:layout_height="38dp" android:layout_weight="1" android:layout_marginEnd="6dp" android:padding="8dp" android:scaleType="centerInside" android:background="@drawable/bg_glass_button_2050" android:src="@drawable/ic_material_palette" android:tint="#FF8A1E" android:contentDescription="@string/material" />
-        <Button android:id="@+id/btnUnit" style="@style/Widget.MaterialComponents.Button.OutlinedButton" android:layout_width="0dp" android:layout_height="38dp" android:layout_weight="1" android:layout_marginEnd="6dp" android:text="@string/unit_mm" android:textAllCaps="false" android:textSize="10sp" android:fontFamily="@font/orbitron" android:textColor="#F0F2F5" android:backgroundTint="#1AFF8A1E" app:strokeColor="#33FF8A1E" app:cornerRadius="12dp" />
+        <Button android:id="@+id/btnUnit" style="@style/Widget.MaterialComponents.Button.OutlinedButton" android:layout_width="0dp" android:layout_height="38dp" android:layout_weight="1" android:layout_marginEnd="6dp" android:text="@string/unit_mm" android:textAllCaps="false" android:textSize="10sp" android:fontFamily="monospace" android:textColor="#F0F2F5" android:backgroundTint="#1AFF8A1E" app:strokeColor="#33FF8A1E" app:cornerRadius="12dp" />
         <ImageButton android:id="@+id/btnExport" android:layout_width="0dp" android:layout_height="38dp" android:layout_weight="1" android:layout_marginEnd="6dp" android:padding="8dp" android:scaleType="centerInside" android:background="@drawable/bg_glass_button_2050" android:src="@drawable/ic_camera_export" android:tint="#FF8A1E" android:contentDescription="@string/export_image" />
         <ImageButton android:id="@+id/btnLightToggle" android:saveEnabled="false" android:layout_width="0dp" android:layout_height="38dp" android:layout_weight="1" android:padding="8dp" android:scaleType="centerInside" android:background="@drawable/bg_glass_button_2050" android:src="@drawable/ic_light_bulb" android:tint="#FF8A1E" android:contentDescription="@string/light" />
     </LinearLayout>
 
-    <!-- Bottom Toolbar - Glass 2050 -->
     <LinearLayout
         android:id="@+id/bottomToolbar"
         android:layout_width="0dp"
