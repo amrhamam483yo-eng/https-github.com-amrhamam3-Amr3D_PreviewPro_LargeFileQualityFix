@@ -1,23 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- ══ الثيم الفاتح (values/ الافتراضي) ══
-         نفس أسماء الألوان بالظبط الموجودة في values-night/colors.xml — بس بقيم فاتحة.
-         الفكرة إن كل layout في المشروع بيستخدم @color/background_dark أو @color/text_primary
-         بالاسم، فمش محتاجين نلمس ولا XML واحد تاني؛ AppCompatDelegate.setDefaultNightMode
-         (شوف AppDisplayMode.kt) هو اللي بيقرر أي نسخة من الملفين تتفعل. -->
-    <color name="background_dark">#F1F2F5</color>
-    <!-- سطح البطاقات في الوضع الفاتح — أبيض صريح عشان يفضل فيه تمايز واضح عن خلفية الصفحة -->
-    <color name="surface_dark">#FFFFFF</color>
+    <!-- 2050 Deep -->
+    <color name="background_dark">#050608</color>
+    <color name="background_light">#F1F2F5</color>
+    <color name="surface_dark">#0A0C10</color>
+    <color name="surface_dark_65">#A30A0C10</color>
+    <color name="surface_glass">#0A0C10</color>
     <color name="accent_orange">#FF8A1E</color>
-    <color name="accent_blue">#1A6FD1</color>
-    <color name="text_primary">#15171C</color>
-    <color name="text_secondary">#5B6472</color>
+    <color name="accent_orange_15">#26FF8A1E</color>
+    <color name="accent_orange_25">#40FF8A1E</color>
+    <color name="accent_orange_40">#66FF8A1E</color>
+    <color name="accent_blue">#3E8FE0</color>
+    <color name="text_primary">#F0F2F5</color>
+    <color name="text_secondary">#7F8FA3</color>
+    <color name="text_dim">#40F0F2F5</color>
+    <color name="border_subtle">#0AFFFFFF</color>
+    <color name="border_glow">#40FF8A1E</color>
     <color name="warning_red">#D93A2E</color>
     <color name="success_green">#1F8F58</color>
-
-    <!-- نسخة الوضع الفاتح من ألوان العناصر العائمة (شوف values-night/colors.xml
-         للتوثيق الكامل) -->
-    <color name="surface_overlay">#CCFFFFFF</color>
-    <color name="compass_disc_center">#E6FFFFFF</color>
-    <color name="compass_disc_edge">#8CFFFFFF</color>
+    <color name="surface_overlay">#CC0A0C10</color>
+    <color name="compass_disc_center">#E60A0C10</color>
+    <color name="compass_disc_edge">#8C0A0C10</color>
 </resources>
